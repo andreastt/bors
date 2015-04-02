@@ -85,7 +85,10 @@ import re
 import logging
 import logging.handlers
 import github
+
 from time import strftime, gmtime
+
+from jenkinsapi.jenkins import Jenkins as JenkinsAPI
 
 __version__ = '1.2'
 
@@ -212,6 +215,46 @@ class BuildBot:
         else:
             self.log.info("missing info sha %s" % sha)
             return (None, [], [])
+
+class Jenkins(object):
+    def __init__(self, cfg):
+        self.log = logging.getLogger("jenkins")
+        # TODO(ato): replace with "job"
+        #self.job_name = [j.encode("utf8") for j in cfg["builders"]][0]
+        self.job_name = "bors"
+        self.nbuilds = cfg["nbuilds"]
+        self.url = cfg["jenkins"].encode("utf8")
+        self.api = JenkinsAPI(self.url)
+
+    @property
+    def job(self):
+        return self.api.get_job(self.job_name)
+
+    def test_status(self, sha):
+        self.log.info("loading build/test status from jenkins")
+
+        build = None
+        for id in self.job.get_build_ids():
+            self.log.info("checking %s" % id)
+            b = self.job.get_build(id)
+            self.log.info("  build.revision=%s" % b.get_revision())
+            self.log.info("  ah=%s" % sha)
+            if b.get_revision() == sha:
+                build = b
+                break
+
+        if build is None or build.is_running():
+            if build is None:
+                self.log.info("no build found for SHA %s" % sha)
+            else:
+                self.log.info("build for SHA %s is running" % sha)
+            return (None, [], [])
+
+        if not build.is_good():
+            self.log.info("build for SHA %s failed" % sha)
+            return (False, [], [])
+        self.log.info("build for SHA %s passed" % sha)
+        return (True, [], [])
 
 def ustr(s):
     if s is None:
@@ -601,8 +644,12 @@ class PullReq:
                                               self.src_repo,
                                               self.sha))))
 
+            self.log.info("before reset_test_ref_to_target")
             self.reset_test_ref_to_target()
+            self.log.info("after reset_test_ref_to_target")
+            self.log.info("before merge_pull_head_to_test_ref")
             self.merge_pull_head_to_test_ref()
+            self.log.info("after merge_pull_head_to_test_ref")
 
         elif s == STATE_PENDING:
             # Make sure the optional merge sha is loaded
@@ -643,9 +690,13 @@ class PullReq:
                     main_urls = [s["target_url"].encode("utf8") for s in failures]
                     extra_urls = [s["target_url"].encode("utf8") for s in errors]
             else:
-                bb = BuildBot(self.cfg)
+                #bb = BuildBot(self.cfg)
+                #(t, main_urls, extra_urls) = bb.test_status(self.merge_sha)
+                bb = Jenkins(self.cfg)
                 (t, main_urls, extra_urls) = bb.test_status(self.merge_sha)
 
+            url = ("https://%s/%s/%s/commit/%s" %
+                 (self.gh_host, self.dst_owner, self.dst_repo, self.merge_sha))
             if t is True:
                 self.log.info("%s - tests passed, marking success", self.short())
                 c = "all tests pass:"
@@ -736,7 +787,6 @@ def main():
         gh = github.GitHub(username=cfg["gh_user"].encode("utf8"),
                            access_token=cfg["gh_token"].encode("utf8"),
                            api_url=cfg.get("gh_api"))
-
 
     owner = cfg["owner"].encode("utf8")
     repo = cfg["repo"].encode("utf8")
